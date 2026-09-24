@@ -1,0 +1,4 @@
+#!/bin/zsh
+set -eu
+DIR="${0:A:h}"
+exec python3 "$DIR/mock_metrics_server.py" "$@"
