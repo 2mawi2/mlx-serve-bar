@@ -1,6 +1,6 @@
 # mlx-serve-bar
 
-A tiny macOS menu-bar app to start, stop, and monitor an [MLX](https://github.com/ml-explore/mlx) inference server (`mlx-serve` / `mlx_lm.server`-style API) without leaving the menu bar.
+A tiny macOS menu-bar app to start, stop, and monitor [mlx-serve](https://github.com/ddalcu/mlx-serve) — the native MLX inference server for Apple Silicon ([MLX](https://github.com/ml-explore/mlx) is the underlying framework) — without leaving the menu bar.
 
 No dock icon, no notifications, no window chrome — one template icon in the menu bar:
 
@@ -14,7 +14,7 @@ No dock icon, no notifications, no window chrome — one template icon in the me
 
 ## What it shows
 
-Every metric, label, formula, and color is a faithful port of the **mlx-serve dashboard's own metrics panel** (the embedded JS in its index page), so the menu-bar popover and the browser dashboard always agree:
+Every metric, label, formula, and color is a faithful port of the [mlx-serve](https://github.com/ddalcu/mlx-serve) dashboard's own metrics panel (the embedded JS in its index page), so the menu-bar popover and the browser dashboard always agree:
 
 | Tile | Source (per dashboard tick) |
 |---|---|
@@ -36,7 +36,7 @@ The app polls `/metrics.json` every 1 s (like the dashboard); if metrics fail bu
 ## Requirements
 
 - macOS 14+ on Apple Silicon
-- An MLX inference server exposing `/health` and `/metrics.json` (the mlx-serve dashboard server)
+- [mlx-serve](https://github.com/ddalcu/mlx-serve) (or any server exposing the same `/health` + `/metrics.json` panel endpoints) running on the Mac
 - Xcode command line tools (Swift 5.9+) to build
 
 ## Install
