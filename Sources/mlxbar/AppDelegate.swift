@@ -66,6 +66,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case "quit":
                 DispatchQueue.main.async { NSApp.terminate(nil) }
                 return "{\"ok\":true,\"bye\":true}"
+            case "privacy":
+                return Privacy.load().json
+            case "cache-clear":
+                let removed = Privacy.clearCache()
+                Privacy.load().save()   // create/normalise the conf on first use
+                return "{\"removed\":\(removed),\"cache_mb\":\(Privacy.cacheMB()),\"cache_entries\":\(Privacy.cacheEntries())}"
+            case let c where c.hasPrefix("privacy-set "):
+                let parts = c.split(separator: " ")
+                guard parts.count == 3 else { return "{\"error\":\"usage: privacy-set <key> <0|1>\"}" }
+                let on = ["1", "true", "yes", "on"].contains(parts[2].lowercased())
+                return Privacy.update(String(parts[1]), on)
             default:
                 return "{\"error\":\"unknown cmd\"}"
             }

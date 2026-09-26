@@ -12,6 +12,7 @@ final class StatusController: NSObject, NSPopoverDelegate, NSMenuDelegate {
 
     private var menuOpen = false
     private var menu: NSMenu!
+    private var privacyItems: [String: NSMenuItem] = [:]
     private var uiEvents: [String] = []
     private var cancellables = Set<AnyCancellable>()
 
@@ -112,6 +113,30 @@ final class StatusController: NSObject, NSPopoverDelegate, NSMenuDelegate {
         login.target = self
         login.state = LoginItem.enabled ? .on : .off
         menu.addItem(login)
+
+        // Privacy: what these write is exactly what the pi wrapper and mlx-serve launchers read.
+        let privacy = NSMenuItem(title: "Privacy", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        let current = Privacy.load()
+        for spec in Privacy.keys {
+            let item = NSMenuItem(title: spec.label, action: #selector(togglePrivacy(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = spec.key
+            item.toolTip = spec.hint
+            item.state = (current.value(spec.key) ?? false) ? .on : .off
+            privacyItems[spec.key] = item
+            sub.addItem(item)
+        }
+        sub.addItem(.separator())
+        let reveal = NSMenuItem(title: "Reveal KV Cache in Finder", action: #selector(revealCache), keyEquivalent: "")
+        reveal.target = self
+        sub.addItem(reveal)
+        let clear = NSMenuItem(title: "Clear KV Cache…", action: #selector(clearCache), keyEquivalent: "")
+        clear.target = self
+        clear.toolTip = "Delete persisted prompt-derived KV state (best done with the server stopped)"
+        sub.addItem(clear)
+        privacy.submenu = sub
+        menu.addItem(privacy)
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit MLX Bar", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
@@ -150,7 +175,51 @@ final class StatusController: NSObject, NSPopoverDelegate, NSMenuDelegate {
     }
     @objc private func quit() { NSApp.terminate(nil) }
 
-    func menuWillOpen(_ menu: NSMenu) { menuOpen = true; if popover.isShown { popover.performClose(nil) } }
+    // MARK: - privacy
+
+    @objc private func togglePrivacy(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        let newValue = sender.state != .on
+        var p = Privacy.load()
+        guard p.set(key, newValue) else { return }
+        p.save()
+        sender.state = newValue ? .on : .off
+        note("privacy \(key)=\(newValue ? 1 : 0)")
+    }
+
+    @objc private func revealCache() {
+        let dir = Privacy.cacheDir
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        NSWorkspace.shared.activateFileViewerSelecting([dir])
+    }
+
+    @objc private func clearCache() {
+        let mb = Privacy.cacheMB()
+        let entries = Privacy.cacheEntries()
+        let alert = NSAlert()
+        alert.messageText = "Clear the on-disk KV cache?"
+        alert.informativeText = "\(entries) persisted entries, \(mb) MB. They hold prompt-derived state for faster warm starts and are rewritten on demand. Best done with the server stopped."
+        alert.addButton(withTitle: "Clear")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let removed = Privacy.clearCache()
+        note("kv-cache cleared: \(removed) entries, was \(mb) MB")
+        let done = NSAlert()
+        done.messageText = "Removed \(removed) cache entries"
+        done.informativeText = "KV cache is now \(Privacy.cacheMB()) MB."
+        done.runModal()
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        menuOpen = true
+        if popover.isShown { popover.performClose(nil) }
+        let p = Privacy.load()
+        for (key, item) in privacyItems { item.state = (p.value(key) ?? false) ? .on : .off }
+        if let clear = menu.item(withTitle: "Privacy")?.submenu?.item(withTitle: "Clear KV Cache…") {
+            clear.title = "Clear KV Cache (\(Privacy.cacheMB()) MB)…"
+        }
+    }
     func menuDidClose(_ menu: NSMenu) { menuOpen = false }
 
     // MARK: - diagnostics for selftests

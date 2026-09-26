@@ -127,17 +127,33 @@ enum RPCClient {
 }
 
 enum CTL {
+    static let usage = """
+    usage: mlx-bar ctl [--config <path>] <command>
+      status                       current server + metrics state
+      start | stop | quit | ping
+      rect | panel | events        UI diagnostics
+      privacy                      show privacy settings + KV cache size
+      privacy-set <key> <0|1>      toggle telemetry|ephemeral|server_log|kv_cache
+      cache-clear                  delete persisted KV cache entries
+    """
+
     static func run(_ args: [String]) -> Int32 {
         var configPath: String? = nil
-        var cmd: String? = nil
+        var positional: [String] = []
         var i = 0
         while i < args.count {
             if args[i] == "--config", i + 1 < args.count { configPath = (args[i + 1] as NSString).expandingTildeInPath; i += 2; continue }
-            cmd = args[i]
+            positional.append(args[i])
             i += 1
         }
-        guard let c = cmd, ["status", "start", "stop", "quit", "ping", "rect", "panel", "events"].contains(c) else {
-            FileHandle.standardError.write(Data("usage: mlx-bar ctl [--config <path>] status|start|stop|quit|ping\n".utf8))
+        guard !positional.isEmpty else {
+            FileHandle.standardError.write(Data(CTL.usage.utf8))
+            return 2
+        }
+        let c = positional.joined(separator: " ")
+        let simple = ["status", "start", "stop", "quit", "ping", "rect", "panel", "events", "privacy", "cache-clear"]
+        guard simple.contains(c) || c.hasPrefix("privacy-set ") else {
+            FileHandle.standardError.write(Data(CTL.usage.utf8))
             return 2
         }
         let cfgURL: URL

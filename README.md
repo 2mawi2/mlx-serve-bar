@@ -74,9 +74,35 @@ The running app exposes a tiny unix-socket RPC (socket next to the config file):
 mlx-bar ctl [--config <path>] status   # JSON: state, pid, live metrics
 mlx-bar ctl ping | start | stop | quit
 mlx-bar ctl rect | panel | events      # diagnostics (icon rect, panel visible, UI event log)
+mlx-bar ctl privacy                    # privacy settings + KV cache size
+mlx-bar ctl privacy-set <key> <0|1>    # telemetry|ephemeral|server_log|kv_cache
+mlx-bar ctl cache-clear                # delete persisted KV cache entries
 ```
 
 `ctl` is what the bundled `tools/lifecycle_test.sh` drives.
+
+## Privacy
+
+Four switches, one file: `~/.pi/agent/mlx-bar-privacy.conf` (valid shell — editable by hand).
+Right-click the menu bar icon → **Privacy** to toggle them; the menu also shows the on-disk KV
+cache size and offers *Reveal in Finder* / *Clear*.
+
+| key | default | effect |
+|---|---|---|
+| `telemetry` | `0` | pi install/update telemetry (mirrored in `enableInstallTelemetry`) |
+| `ephemeral` | `1` | `~/.local/bin/pi` adds `--no-session` unless you pass `-c/--continue/--session` or `PI_PERSIST=1` |
+| `server_log` | `1` | `0` ⇒ the mlx-serve launcher adds `--log-level warn --log-file off` |
+| `kv_cache` | `1` | `0` ⇒ the launcher drops `--prefix-cache-disk` (no prompt-derived state written) |
+
+Per-invocation env vars still win: `PI_TELEMETRY`, `PI_PERSIST`, `PI_DEFAULT_EPHEMERAL`,
+`MLX_SERVE_PRIVATE`, `MLX_SERVE_LOG_LEVEL`, `MLX_SERVE_LOG_FILE`.
+
+**Leave the KV cache on unless you care more about disk than speed.** It is the main lever behind
+96 % prompt reuse — a cold re-prefill of a 100 K-token context costs 60–150 s. It lives outside
+`~/Library/Caches`, so macOS never cleans it; the server evicts entries under its byte budget, but
+the *real* footprint runs ~2.4× that budget because SSM checkpoints are not counted in it
+(measured: 60 entries ≈ 39 GB with `--prefix-cache-disk 16GB`). Use **Clear KV Cache** when you
+want the space back — it is rewritten on demand.
 
 ## Development
 
