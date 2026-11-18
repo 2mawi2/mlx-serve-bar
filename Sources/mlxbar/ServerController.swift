@@ -1,7 +1,8 @@
 import Foundation
 
 final class ServerController {
-    let config: AppConfig
+    var config: AppConfig
+    var backend: Backend
     private(set) var child: Process?
     private(set) var externalPid: Int32?
     var serving = false { didSet { if serving != oldValue { servingChanged() } } }
@@ -9,7 +10,10 @@ final class ServerController {
     var state: ServerState = .unknown
     var onStateChange: ((ServerState) -> Void)?
 
-    init(config: AppConfig) { self.config = config }
+    init(config: AppConfig) {
+        self.config = config
+        self.backend = config.backend
+    }
 
     var ownedPid: Int32? { child?.processIdentifier }
 
@@ -74,31 +78,37 @@ final class ServerController {
         refreshState()
     }
 
-    // Scan for a running mlx-serve matching the configured port (started outside the bar).
-    func detectExternal() {
+    // Scan for a running server of either flavor matching the configured port
+    // (started outside the bar). Returns the detected backend, if any.
+    @discardableResult
+    func detectExternal() -> Backend? {
         let out = Shell.run("/bin/ps", ["-axo", "pid=,command="]) ?? ""
         var found: Int32? = nil
+        var foundBackend: Backend? = nil
         for line in out.split(separator: "\n") {
             let parts = line.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
             guard parts.count == 2, let pid = Int32(parts[0]) else { continue }
             if pid == child?.processIdentifier { continue }
-            let tokens = AppConfig.tokenize(String(parts[1]))
-            guard let first = tokens.first else { continue }
-            let base = (first as NSString).lastPathComponent
-            guard base.hasPrefix("mlx-serve") else { continue }
+            let cmd = String(parts[1])
+            guard let b = Backend.detect(fromCommand: cmd) else { continue }
+            let tokens = AppConfig.tokenize(cmd)
             let hasPort = tokens.contains("--port") && tokens.contains(String(config.port))
             if hasPort || tokens.contains(String(config.port)) {
                 found = pid
+                foundBackend = b
                 break
             }
         }
         externalPid = found
+        if let foundBackend, foundBackend != backend { backend = foundBackend }
+        return foundBackend
     }
 
     func statusJSON() -> String {
         let s = MetricsEngineStatic.snapshotProvider?()
         var kv = [
             "\"state\":\"\(state.rawValue)\"",
+            "\"backend\":\"\(backend.rawValue)\"",
             "\"serving\":\(serving)",
             "\"owned_pid\":\(child?.processIdentifier ?? 0)",
             "\"external_pid\":\(externalPid ?? 0)"

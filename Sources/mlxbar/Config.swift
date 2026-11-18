@@ -5,6 +5,7 @@ struct RawConfig: Codable {
     var args: [String]
     var host: String
     var port: Int
+    var backend: String?
 }
 
 struct AppConfig {
@@ -12,13 +13,19 @@ struct AppConfig {
     var args: [String]
     var host: String
     var port: Int
+    var backend: Backend
     var fileURL: URL
 
     var baseURL: String { "http://\(host):\(port)" }
     var dashboardURL: String { "http://\(host):\(port)/" }
+    var metricsURL: String { baseURL + backend.metricsPath }
+    var metricsEnableURL: String { baseURL + "/metrics/enable" }
+    var healthURL: String { baseURL + "/health" }
+    var modelsURL: String { baseURL + "/v1/models" }
 
-    // Canonical launcher: port safety checks + checksum gate + full args.
-    static var startScript: String { ("~/.local/bin/mlx-serve-start" as NSString).expandingTildeInPath }
+    /// Canonical launcher for the active backend: port safety checks, model
+    /// verification and full args baked in.
+    var startScript: String { backend.startScript }
 
     var labelSuffix: String {
         fileURL.lastPathComponent == "config.json" ? "" : "-\(fileURL.deletingPathExtension().lastPathComponent)"
@@ -55,19 +62,27 @@ struct AppConfig {
         }
         if let data = try? Data(contentsOf: url),
            let raw = try? JSONDecoder().decode(RawConfig.self, from: data) {
+            let b = raw.backend.flatMap { Backend(rawValue: $0) }
+                ?? Backend.infer(bin: raw.bin, args: raw.args)
             return AppConfig(bin: (raw.bin as NSString).expandingTildeInPath,
-                             args: raw.args, host: raw.host, port: raw.port, fileURL: url)
+                             args: raw.args, host: raw.host, port: raw.port,
+                             backend: b, fileURL: url)
         }
-        var cfg = discover() ?? RawConfig(bin: startScript, args: [],
-                                          host: "127.0.0.1", port: 11234)
+        var cfg = discover() ?? RawConfig(bin: Backend.mlxServe.startScript, args: [],
+                                          host: "127.0.0.1", port: 11234,
+                                          backend: Backend.mlxServe.rawValue)
         cfg.bin = (cfg.bin as NSString).expandingTildeInPath
-        let app = AppConfig(bin: cfg.bin, args: cfg.args, host: cfg.host, port: cfg.port, fileURL: url)
+        let b = cfg.backend.flatMap { Backend(rawValue: $0) }
+            ?? Backend.infer(bin: cfg.bin, args: cfg.args)
+        let app = AppConfig(bin: cfg.bin, args: cfg.args, host: cfg.host, port: cfg.port,
+                            backend: b, fileURL: url)
         app.save()
         return app
     }
 
     func save() {
-        let raw = RawConfig(bin: bin, args: args, host: host, port: port)
+        let raw = RawConfig(bin: bin, args: args, host: host, port: port,
+                            backend: backend.rawValue)
         if let data = try? JSONEncoder().encodeWithPretty(raw) {
             try? data.write(to: fileURL)
         }
@@ -79,10 +94,10 @@ struct AppConfig {
             let parts = line.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
             guard parts.count == 2 else { continue }
             let cmd = String(parts[1])
+            guard let backend = Backend.detect(fromCommand: cmd) else { continue }
             let tokens = tokenize(cmd)
             guard let first = tokens.first else { continue }
             let base = (first as NSString).lastPathComponent
-            guard base == "mlx-serve" || base == "mlx-serve-flash" || base == "mlx-serve.exe" else { continue }
             let argTokens = Array(tokens.dropFirst())
             var host = "127.0.0.1"
             var port = 11234
@@ -92,19 +107,22 @@ struct AppConfig {
                 if argTokens[i] == "--port", i + 1 < argTokens.count, let p = Int(argTokens[i + 1]) { port = p; i += 2; continue }
                 i += 1
             }
-            let wrapper = ("~/.local/bin/\(base)" as NSString).expandingTildeInPath
-            // Prefer the canonical start script (safety checks + full args baked in);
+            let canonical = backend.startScript
+            // Prefer the canonical start script (safety checks + full args baked in,
+            // and for sushi it also opens the metrics endpoint);
             // fall back to the discovered wrapper/binary with the live args.
             let bin: String
             let args: [String]
-            if FileManager.default.isExecutableFile(atPath: startScript) {
-                bin = startScript
+            if FileManager.default.isExecutableFile(atPath: canonical) {
+                bin = canonical
                 args = []
             } else {
+                let wrapper = ("~/.local/bin/\(base)" as NSString).expandingTildeInPath
                 bin = FileManager.default.isExecutableFile(atPath: wrapper) ? wrapper : first
                 args = argTokens
             }
-            return RawConfig(bin: bin, args: args, host: host, port: port)
+            return RawConfig(bin: bin, args: args, host: host, port: port,
+                             backend: backend.rawValue)
         }
         return nil
     }

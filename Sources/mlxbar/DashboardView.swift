@@ -169,6 +169,110 @@ struct SparkTile: View {
     }
 }
 
+// Pi sessions on this machine, read from their transcripts (see AgentStats.swift).
+// One compact row per session: which project, which model, how full its context
+// is, what it has spent and how fast it writes.
+struct AgentRow: View {
+    let s: AgentSession
+    let now: Date
+
+    var body: some View {
+        let live = s.working(now: now)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(live ? liveText : muteText)
+                    .frame(width: 5, height: 5)
+                Text(s.title)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(valColor)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(s.phase(now: now))
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundStyle(live ? liveText : subColor)
+                    .fixedSize()
+                Spacer()
+                Text(s.ctxPct >= 0 ? Formats.dashInt(s.ctxPct) + "%" : "—")
+                    .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    .foregroundStyle(ctxColor)
+                Text("ctx").font(.system(size: 9)).foregroundStyle(lblColor)
+            }
+            HStack(spacing: 4) {
+                Text(s.model.isEmpty ? "—" : s.model)
+                    .font(.system(size: 8.5, design: .monospaced))
+                    .foregroundStyle(lblColor)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+                Text(detail)
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(subColor)
+                    .lineLimit(1)
+            }
+            .padding(.top, 3)
+            if s.ctxPct >= 0 {
+                DashBar(pct: Int(s.ctxPct.rounded()))
+            }
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, s.ctxPct >= 0 ? 7 : 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(tileBG))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(live ? tileBorder : tileBorder.opacity(0.6), lineWidth: 1))
+    }
+
+    private var ctxColor: Color {
+        guard let p = Optional(s.ctxPct), p >= 0 else { return valColor }
+        if p >= 90 { return critFill }
+        if p >= 70 { return warnFill }
+        return valColor
+    }
+
+    private var detail: String {
+        var parts = ["\(Formats.fmt(Double(s.outputTokens), 0)) out"]
+        if s.outTps >= 0 { parts.append("\(Formats.fmt(s.outTps, 0)) tok/s") }
+        parts.append("\(Formats.fmt(Double(s.cacheReadTokens), 0)) cached")
+        if s.cost > 0 { parts.append("$" + String(format: "%.2f", s.cost)) }
+        return parts.joined(separator: " · ")
+    }
+}
+
+struct AgentSection: View {
+    let snap: AgentSnapshot
+
+    var body: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 6) {
+                Text("PI SESSIONS")
+                    .font(.system(size: 9, weight: .medium))
+                    .tracking(0.7)
+                    .foregroundStyle(lblColor)
+                Spacer()
+                Text(snap.isEmpty ? "none" : "\(snap.sessions.count) recent · \(snap.workingCount) working")
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(subColor)
+            }
+            .padding(.horizontal, 2)
+            if snap.isEmpty {
+                Text("No Pi session wrote a transcript in the last 5 minutes. "
+                     + "Ephemeral sessions (--no-session) never appear.")
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(subColor)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 9)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(tileBG))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(tileBorder, lineWidth: 1))
+            } else {
+                ForEach(Array(snap.sessions.prefix(3).enumerated()), id: \.element.id) { _, s in
+                    AgentRow(s: s, now: snap.now)
+                }
+            }
+        }
+    }
+}
+
 struct StatsGrid: View {
     @ObservedObject var model: MetricsModel
 
@@ -195,7 +299,7 @@ struct StatsGrid: View {
                 MetricTile(label: "Memory", value: Formats.raw(s.memMB), unit: "MB",
                            sub: "physical footprint")
                 MetricTile(label: "Generated", value: Formats.fmt(s.liveTok, 0), unit: "tok",
-                           sub: Formats.fmt(Double(s.reqSuccess), 0) + " requests")
+                           sub: Formats.fmt(Double(s.reqSuccess), 0) + " requests" + draftSub(s))
             }
             SparkTile(label: "Decode tok/s · last 60s",
                       value: model.decodeHist.last.map { Formats.fmt($0, 1) } ?? "—",
@@ -226,6 +330,11 @@ struct StatsGrid: View {
         if s.tokPct >= 0 { return base + " · \(Formats.dashInt(s.tokPct))% tokens reused" }
         return base
     }
+
+    /// splash drafts with a small model; only it reports an acceptance ratio.
+    func draftSub(_ s: MetricsSnapshot) -> String {
+        s.acceptPct >= 0 ? " · \(Formats.dashInt(s.acceptPct))% draft accepted" : ""
+    }
 }
 
 // Interactive panel shown on click: same stats plus power control / links.
@@ -241,7 +350,7 @@ struct DashboardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Text("mlx-serve")
+                Text(model.backend.displayName)
                     .font(.system(size: 12, weight: .bold, design: .monospaced))
                     .foregroundStyle(valColor)
                 Text(model.stateLabel)
@@ -265,6 +374,7 @@ struct DashboardView: View {
                 .disabled(model.state == .loading || model.state == .stopping)
                 .help(model.state == .running ? "Stop server" : "Start server")
             }
+            AgentSection(snap: model.agent)
             StatsGrid(model: model)
             HStack {
                 Text("\(host):\(port)")

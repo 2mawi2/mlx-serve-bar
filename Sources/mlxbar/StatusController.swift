@@ -12,7 +12,10 @@ final class StatusController: NSObject, NSPopoverDelegate, NSMenuDelegate {
 
     private var menuOpen = false
     private var menu: NSMenu!
+    private var lastTitle = ""
     private var privacyItems: [String: NSMenuItem] = [:]
+    private var kvCacheItems: [NSMenuItem] = []
+    private var kvRAMItem: NSMenuItem?
     private var uiEvents: [String] = []
     private var cancellables = Set<AnyCancellable>()
 
@@ -20,7 +23,7 @@ final class StatusController: NSObject, NSPopoverDelegate, NSMenuDelegate {
         self.config = config
         self.controller = controller
         self.engine = engine
-        item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         button = item.button!
         super.init()
 
@@ -39,7 +42,8 @@ final class StatusController: NSObject, NSPopoverDelegate, NSMenuDelegate {
         host.view.appearance = NSAppearance(named: .darkAqua)
         popover.contentViewController = host
 
-        button.image = NSImage(systemSymbolName: "waveform.path.ecg", accessibilityDescription: "mlx-serve")?
+        button.image = NSImage(systemSymbolName: engine.model.backend.symbolName,
+                              accessibilityDescription: engine.model.backend.symbolDescription)?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 14, weight: .medium))
         button.image?.isTemplate = true
         button.target = self
@@ -50,6 +54,10 @@ final class StatusController: NSObject, NSPopoverDelegate, NSMenuDelegate {
         engine.model.$snap
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.updateIcon() }
+            .store(in: &cancellables)
+        engine.model.$backend
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.refreshChrome() }
             .store(in: &cancellables)
         controller.onStateChange = { [weak self] state in
             self?.engine.model.state = state
@@ -73,9 +81,24 @@ final class StatusController: NSObject, NSPopoverDelegate, NSMenuDelegate {
         NSLog("mlx-bar: \(s)")
     }
 
+    /// Backend changed (sushi ↔ mlx-serve): refresh icon, menu titles and tooltip.
+    func refreshChrome() {
+        updateIcon()
+        rebuildMenuTitles()
+    }
+
+    private func rebuildMenuTitles() {
+        let b = engine.model.backend
+        let toggle = (controller.state == .running) ? "Stop \(b.displayName)" : "Start \(b.displayName)"
+        menu.items.first?.title = toggle
+        menu.items.first?.isEnabled = controller.state != .loading && controller.state != .stopping
+        button.toolTip = b.symbolDescription
+    }
+
     private func updateIcon() {
         let s = engine.model.state
-        let base = NSImage(systemSymbolName: "waveform.path.ecg", accessibilityDescription: "mlx-serve")?
+        let backend = engine.model.backend
+        let base = NSImage(systemSymbolName: backend.symbolName, accessibilityDescription: backend.symbolDescription)?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 14, weight: .medium))
         switch s {
         case .running, .stopped, .unknown:
@@ -89,14 +112,39 @@ final class StatusController: NSObject, NSPopoverDelegate, NSMenuDelegate {
                 button.image = img
             }
         }
-        menu.items.first?.title = (s == .running) ? "Stop mlx-serve" : "Start mlx-serve"
+        let bar = barImage
+        if let bar {
+            // The readout image replaces the icon entirely while serving.
+            button.image = bar
+            button.attributedTitle = NSAttributedString(string: "")
+        } else {
+            // Not serving: the switch above already set the (state-colored) icon.
+            button.attributedTitle = NSAttributedString(string: "")
+        }
+        menu.items.first?.title = (s == .running) ? "Stop \(backend.displayName)" : "Start \(backend.displayName)"
         menu.items.first?.isEnabled = s != .loading && s != .stopping
+    }
+
+    // Inline readout while serving: two rows (decode over prefill) rendered
+    // into a fixed-size, vertically centered image. nil ⇒ fall back to icon.
+    private var barImage: NSImage? {
+        let snap = engine.model.snap
+        guard engine.model.state == .running, snap.serving else { return nil }
+        let dark = button.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let (decCol, preCol) = BarTrend.colors(dark: dark)
+        let dim = dark ? NSColor(white: 1, alpha: 0.25) : NSColor(white: 0, alpha: 0.20)
+
+        let dHist = Array(engine.model.decodeHist.suffix(BarTrend.barCount))
+        let pHist = Array(engine.model.prefillHist.suffix(BarTrend.barCount))
+        let l1 = BarTrend.row("", snap.decode, dHist, BarTrend.decodeFloor)
+        let l2 = BarTrend.row("", snap.prefill, pHist, BarTrend.prefillFloor)
+        return BarTrend.image(dark: dark, rows: [(l1, decCol), (l2, preCol)], empty: dim)
     }
 
     private func buildMenu() {
         menu = NSMenu()
         menu.delegate = self
-        let toggle = NSMenuItem(title: "Start mlx-serve", action: #selector(toggleServer), keyEquivalent: "")
+        let toggle = NSMenuItem(title: "Start \(engine.model.backend.displayName)", action: #selector(toggleServer), keyEquivalent: "")
         toggle.target = self
         menu.addItem(toggle)
         let dash = NSMenuItem(title: "Open Dashboard…", action: #selector(openDashboard), keyEquivalent: "")
@@ -135,6 +183,12 @@ final class StatusController: NSObject, NSPopoverDelegate, NSMenuDelegate {
         clear.target = self
         clear.toolTip = "Delete persisted prompt-derived KV state (best done with the server stopped)"
         sub.addItem(clear)
+        kvCacheItems = [reveal, clear]
+        // splash holds KV in RAM: nothing on disk to reveal or delete.
+        let ram = NSMenuItem(title: "KV cache is RAM-only (nothing to clear)", action: nil, keyEquivalent: "")
+        ram.isEnabled = false
+        sub.addItem(ram)
+        kvRAMItem = ram
         privacy.submenu = sub
         menu.addItem(privacy)
         menu.addItem(.separator())
@@ -216,7 +270,10 @@ final class StatusController: NSObject, NSPopoverDelegate, NSMenuDelegate {
         if popover.isShown { popover.performClose(nil) }
         let p = Privacy.load()
         for (key, item) in privacyItems { item.state = (p.value(key) ?? false) ? .on : .off }
-        if let clear = menu.item(withTitle: "Privacy")?.submenu?.item(withTitle: "Clear KV Cache…") {
+        let onDisk = Privacy.kvCacheOnDisk
+        for item in kvCacheItems { item.isHidden = !onDisk }
+        kvRAMItem?.isHidden = onDisk
+        if let clear = kvCacheItems.last {
             clear.title = "Clear KV Cache (\(Privacy.cacheMB()) MB)…"
         }
     }

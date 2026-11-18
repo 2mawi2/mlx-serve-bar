@@ -7,11 +7,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var controller: ServerController!
     var status: StatusController!
     var rpc: RPCServer!
+    var scanner: AgentScanner!
+    private var agentTimer: Timer?
     private var healthMisses = 0
+    private var backendProbes = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         config = AppConfig.load()
+        Privacy.activeBackend = config.backend
         engine = MetricsEngine()
+        engine.model.backend = config.backend
         controller = ServerController(config: config)
         status = StatusController(config: config, controller: controller, engine: engine)
 
@@ -21,25 +26,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         poller = Poller(
-            metricsURL: config.baseURL + "/metrics.json",
-            healthURL: config.baseURL + "/health")
+            metricsURL: config.metricsURL,
+            enableURL: config.metricsEnableURL,
+            healthURL: config.healthURL)
+        // sushi serves /metrics only on demand; ask once when the endpoint says so.
+        poller.onMetricsDisabled = { [weak self] in
+            guard let self else { return }
+            if self.config.backend.metricsOptIn { self.poller.enableMetrics() }
+        }
         poller.onResult = { [weak self] data, healthOK in
             guard let self else { return }
             if let data {
                 self.healthMisses = 0
-                if !self.controller.serving { self.controller.serving = true }
-                self.engine.update(json: data)
+                if !self.controller.serving {
+                    self.controller.serving = true
+                    self.probeBackend()
+                }
+                self.engine.update(feed: data)
             } else if healthOK {
                 // Healthy server but metrics timed out or are unavailable:
                 // plateau the stats instead of flashing zeros/stopped.
                 self.healthMisses = 0
-                if !self.controller.serving { self.controller.serving = true }
+                if !self.controller.serving {
+                    self.controller.serving = true
+                    self.probeBackend()
+                }
                 self.engine.updateStale()
             } else {
                 self.healthMisses += 1
                 if self.healthMisses >= 2 {
                     if self.controller.serving { self.controller.serving = false }
-                    self.engine.update(json: nil)
+                    self.engine.update(feed: nil)
                 }
             }
         }
@@ -49,11 +66,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return "{}" }
             switch cmd.cmd {
             case "status":
-                self.controller.detectExternal()
+                self.adopt(self.controller.detectExternal())
                 return self.controller.statusJSON()
             case "start":
+                self.adopt(self.controller.detectExternal())
                 self.controller.start()
-                return "{\"ok\":true}"
+                return "{\"ok\":true,\"backend\":\"\(self.config.backend.rawValue)\"}"
             case "stop":
                 self.controller.stop()
                 return "{\"ok\":true}"
@@ -63,6 +81,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 return "{\"visible\":\(self.status.panelVisible())}"
             case "events":
                 return self.status.eventsJSON()
+            case "agent":
+                return self.scanner.scan().json()
             case "quit":
                 DispatchQueue.main.async { NSApp.terminate(nil) }
                 return "{\"ok\":true,\"bye\":true}"
@@ -83,10 +103,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         rpc.start()
 
-        controller.detectExternal()
+        adopt(controller.detectExternal())
         controller.refreshState()
         engine.model.state = controller.state
         poller.start()
+
+        // Agent-side stats: Pi transcripts, polled separately from the server
+        // because they must keep working when the server is stopped or unreachable.
+        scanner = AgentScanner()
+        engine.model.agent = scanner.scan()
+        agentTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            self.engine.model.agent = self.scanner.scan()
+        }
+    }
+
+    /// Adopt the backend of the server actually running (mlx-serve vs sushi),
+    /// rewrite config.json so the power button launches the right launcher, and
+    /// keep the menu-bar chrome in sync.
+    private func adopt(_ detected: Backend?) {
+        guard let b = detected else { return }
+        let backendChanged = b != config.backend
+        let launcherStale = Backend.infer(bin: config.bin, args: config.args) != b
+        guard backendChanged || launcherStale else { return }
+        config.backend = b
+        Privacy.activeBackend = b
+        engine.model.backend = b
+        controller.backend = b
+        if launcherStale {
+            // A stale config.json may still point at the other flavor's launcher.
+            let script = b.startScript
+            if FileManager.default.isExecutableFile(atPath: script) {
+                config.bin = script
+                config.args = []
+            }
+        }
+        controller.config = config
+        config.save()
+        status.refreshChrome()
+        // splash serves /metrics, not /metrics.json: follow the backend.
+        if poller.point(metrics: config.metricsURL, enable: config.metricsEnableURL,
+                        health: config.healthURL) {
+            engine.reset()
+        }
+        NSLog("mlx-bar: backend = \(b.rawValue) (\(config.bin))")
+        if b.metricsOptIn { poller.enableMetrics() }
+    }
+
+    /// Fallback flavor detection for servers whose process line is hidden
+    /// (e.g. launched by another wrapper): `/v1/models` advertises `owned_by`.
+    private func probeBackend() {
+        guard backendProbes < 3 else { return }
+        backendProbes += 1
+        guard let u = URL(string: config.modelsURL) else { return }
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.timeoutIntervalForRequest = 2
+        cfg.urlCache = nil
+        URLSession(configuration: cfg).dataTask(with: u) { [weak self] data, resp, _ in
+            guard let self, (resp as? HTTPURLResponse)?.statusCode == 200, let data,
+                  let b = Backend.detect(fromModelsJSON: data) else { return }
+            DispatchQueue.main.async { self.adopt(b) }
+        }.resume()
     }
 
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }

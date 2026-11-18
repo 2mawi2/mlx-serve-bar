@@ -2,3 +2,6 @@
 dist/
 .DS_Store
 .kilo/
+.pi/
+__pycache__/
+*.py[cod]

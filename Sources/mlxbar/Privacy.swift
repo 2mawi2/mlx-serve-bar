@@ -16,10 +16,15 @@ struct Privacy: Equatable {
             .appendingPathComponent(".pi/agent/mlx-bar-privacy.conf")
     }
 
-    static var cacheDir: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".mlx-serve/kv-cache")
-    }
+    /// Backend the bar is currently watching; its KV cache is what the menu
+    /// reveals/clears. Set by AppDelegate at launch and on backend changes.
+    static var activeBackend: Backend = .mlxServe
+
+    static var cacheDir: URL { activeBackend.kvCacheDir }
+
+    /// splash keeps KV state in RAM, so there is no prompt-derived folder to size,
+    /// reveal or delete; reporting the app-support folder as a "cache" would lie.
+    static var kvCacheOnDisk: Bool { activeBackend.persistentKVCache }
 
     static let keys: [(key: String, label: String, hint: String)] = [
         ("telemetry", "pi telemetry", "anonymous install/update reports"),
@@ -74,7 +79,7 @@ struct Privacy: Equatable {
                                                  withIntermediateDirectories: true)
         let text = """
         # MLX Bar privacy settings — managed by the MLX Bar app, safe to edit by hand.
-        # This file is sourced by ~/.local/bin/pi and by the mlx-serve launchers (valid sh).
+        # This file is sourced by ~/.local/bin/pi and by the server launchers (valid sh).
         telemetry=\(telemetry ? 1 : 0)      # 1 = allow pi install/update telemetry
         ephemeral=\(ephemeral ? 1 : 0)      # 1 = pi runs with --no-session unless you pass -c/--session
         server_log=\(serverLog ? 1 : 0)     # 1 = keep the server's prompt log (first line of each message)
@@ -95,6 +100,8 @@ struct Privacy: Equatable {
         var kv = Privacy.keys.map { "\($0.key):\((value($0.key) ?? false) ? "true" : "false")" }
         kv.append("cache_mb:\(Privacy.cacheMB())")
         kv.append("cache_entries:\(Privacy.cacheEntries())")
+        kv.append("kv_cache_disk:\(Privacy.kvCacheOnDisk)")
+        kv.append("backend:\"\(Privacy.activeBackend.rawValue)\"")
         kv.append("conf:\"\(Privacy.confURL.path)\"")
         return "{\(kv.joined(separator: ","))}"
     }
@@ -102,6 +109,7 @@ struct Privacy: Equatable {
     // MARK: - KV cache inspection / cleanup
 
     static func cacheMB() -> Int {
+        guard kvCacheOnDisk else { return 0 }
         guard let out = Shell.run("/usr/bin/du", ["-sk", cacheDir.path]) else { return 0 }
         let kb = out.split(whereSeparator: { $0 == "\t" || $0 == "\n" }).first
             .flatMap { Int($0.trimmingCharacters(in: .whitespaces)) } ?? 0
@@ -109,6 +117,7 @@ struct Privacy: Equatable {
     }
 
     static func cacheEntries() -> Int {
+        guard kvCacheOnDisk else { return 0 }
         guard let models = try? FileManager.default.contentsOfDirectory(atPath: cacheDir.path) else { return 0 }
         var n = 0
         for m in models {
@@ -121,6 +130,7 @@ struct Privacy: Equatable {
 
     /// Delete every persisted entry directory. Safe only while the server is stopped.
     static func clearCache() -> Int {
+        guard kvCacheOnDisk else { return 0 }
         let fm = FileManager.default
         var removed = 0
         guard let models = try? fm.contentsOfDirectory(atPath: cacheDir.path) else { return 0 }

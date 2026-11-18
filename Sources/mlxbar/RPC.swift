@@ -130,6 +130,7 @@ enum CTL {
     static let usage = """
     usage: mlx-bar ctl [--config <path>] <command>
       status                       current server + metrics state
+      agent                        live Pi agent sessions (model, context, tokens)
       start | stop | quit | ping
       rect | panel | events        UI diagnostics
       privacy                      show privacy settings + KV cache size
@@ -151,7 +152,8 @@ enum CTL {
             return 2
         }
         let c = positional.joined(separator: " ")
-        let simple = ["status", "start", "stop", "quit", "ping", "rect", "panel", "events", "privacy", "cache-clear"]
+        let simple = ["status", "agent", "start", "stop", "quit", "ping", "rect", "panel",
+                      "events", "privacy", "cache-clear"]
         guard simple.contains(c) || c.hasPrefix("privacy-set ") else {
             FileHandle.standardError.write(Data(CTL.usage.utf8))
             return 2
